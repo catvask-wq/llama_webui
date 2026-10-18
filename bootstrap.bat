@@ -1,115 +1,262 @@
 @echo off
-chcp 65001 >nul
+setlocal EnableExtensions DisableDelayedExpansion
+
 title GGUF Launcher
-setlocal EnableExtensions
+
+set "SCRIPT_DIR=%~dp0"
+set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+set "LAUNCHER=%SCRIPT_DIR%\launcher.py"
+set "LAUNCHER_ARGS=%*"
 
 echo ==============================================
-echo    GGUF LAUNCHER - проверка окружения
+echo             GGUF LAUNCHER
 echo ==============================================
 echo.
 
-set "SCRIPT_DIR=%~dp0"
-
-if not exist "%SCRIPT_DIR%launcher.py" (
-    echo [ОШИБКА] Рядом с bootstrap.bat не найден файл launcher.py
-    echo          Положите оба файла в одну папку и запустите снова.
+if not exist "%LAUNCHER%" (
+    echo [ERROR] launcher.py was not found:
+    echo "%LAUNCHER%"
+    echo.
     pause
     exit /b 1
 )
 
-rem ---------- ищем Python ----------
+cd /d "%SCRIPT_DIR%" >nul 2>nul
 
-set "PY="
-
-rem python из PATH, но с проверкой, что это НЕ заглушка Microsoft Store
-where python >nul 2>nul && python --version >nul 2>nul && set "PY=python"
-
-if not defined PY (
-    where py >nul 2>nul && py -3 --version >nul 2>nul && set "PY=py -3"
+if errorlevel 1 (
+    echo [ERROR] Cannot access launcher directory.
+    pause
+    exit /b 1
 )
 
-if defined PY goto :have_python
+call :find_python
 
-echo [i] Python не найден. Пробую установить автоматически...
+if defined PYTHON goto RUN_LAUNCHER
+
+echo [INFO] Python was not found.
+echo [INFO] Trying automatic installation...
 echo.
 
 where winget >nul 2>nul
-if not errorlevel 1 goto :winget
 
-rem ---------- установка без winget ----------
+if not errorlevel 1 goto INSTALL_WINGET
 
-echo [i] winget не найден. Скачиваю установщик с python.org...
-set "INSTALLER=%TEMP%\python-installer.exe"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.12.7/python-3.12.7-amd64.exe' -OutFile '%INSTALLER%'"
+goto INSTALL_DIRECT
+
+
+:INSTALL_WINGET
+echo [INFO] Installing Python with winget...
+echo.
+
+winget install ^
+    --id Python.Python.3.12 ^
+    -e ^
+    --silent ^
+    --accept-package-agreements ^
+    --accept-source-agreements
+
 if errorlevel 1 (
-    echo [ОШИБКА] Не удалось скачать установщик Python.
-    echo          Проверьте интернет или скачайте Python вручную:
-    echo          https://www.python.org/downloads/
-    echo          При установке отметьте галочку "Add python.exe to PATH".
-    pause
-    exit /b 1
-)
-echo [i] Устанавливаю Python, это займёт пару минут...
-"%INSTALLER%" /quiet InstallAllUsers=0 PrependPath=1 Include_test=0
-if errorlevel 1 (
-    echo [ОШИБКА] Установка Python завершилась с ошибкой.
-    echo          Без Python работать не могу. Установите вручную:
-    echo          https://www.python.org/downloads/
-    pause
-    exit /b 1
-)
-goto :find_after_install
-
-rem ---------- установка через winget ----------
-
-:winget
-echo [i] Устанавливаю Python через winget, это займёт пару минут...
-winget install --id Python.Python.3.12 -e --silent --accept-package-agreements --accept-source-agreements
-if errorlevel 1 (
-    echo [ОШИБКА] winget не смог установить Python.
-    echo          Без Python работать не могу. Установите вручную:
-    echo          https://www.python.org/downloads/
+    echo.
+    echo [ERROR] winget failed to install Python.
+    echo.
+    echo Install Python manually from:
+    echo https://www.python.org/downloads/
+    echo.
     pause
     exit /b 1
 )
 
-rem ---------- перепроверка после установки ----------
+goto CHECK_AFTER_INSTALL
 
-:find_after_install
-set "PY="
-where python >nul 2>nul && python --version >nul 2>nul && set "PY=python"
-if defined PY goto :have_python
-where py >nul 2>nul && py -3 --version >nul 2>nul && set "PY=py -3"
-if defined PY goto :have_python
 
-rem PATH в текущем окне не обновился - ищем установленный Python руками
-if exist "%LocalAppData%\Programs\Python\Python312\python.exe" set "PY=%LocalAppData%\Programs\Python\Python312\python.exe"
-if defined PY goto :have_python
-if exist "%ProgramFiles%\Python312\python.exe" set "PY=%ProgramFiles%\Python312\python.exe"
-if defined PY goto :have_python
-if exist "%LocalAppData%\Programs\Python\Python313\python.exe" set "PY=%LocalAppData%\Programs\Python\Python313\python.exe"
-if defined PY goto :have_python
+:INSTALL_DIRECT
+echo [INFO] winget was not found.
+echo [INFO] Downloading Python installer...
+echo.
+
+where powershell >nul 2>nul
+
+if errorlevel 1 (
+    echo [ERROR] PowerShell was not found.
+    echo.
+    echo Install Python manually from:
+    echo https://www.python.org/downloads/
+    echo.
+    pause
+    exit /b 1
+)
+
+set "PYTHON_VERSION=3.12.7"
+set "INSTALLER=%TEMP%\python-%PYTHON_VERSION%-installer.exe"
+set "PYTHON_URL=https://www.python.org/ftp/python/%PYTHON_VERSION%/python-%PYTHON_VERSION%-amd64.exe"
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$ProgressPreference='SilentlyContinue';" ^
+    "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;" ^
+    "Invoke-WebRequest -Uri '%PYTHON_URL%' -OutFile '%INSTALLER%'"
+
+if errorlevel 1 (
+    echo [ERROR] Failed to download Python installer.
+    echo.
+    pause
+    exit /b 1
+)
+
+if not exist "%INSTALLER%" (
+    echo [ERROR] Python installer was not downloaded.
+    pause
+    exit /b 1
+)
+
+echo [INFO] Installing Python...
+echo.
+
+"%INSTALLER%" ^
+    /quiet ^
+    InstallAllUsers=0 ^
+    PrependPath=1 ^
+    Include_test=0 ^
+    Include_launcher=1 ^
+    SimpleInstall=1
+
+if errorlevel 1 (
+    echo.
+    echo [ERROR] Python installation failed.
+    echo.
+    del "%INSTALLER%" >nul 2>nul
+    pause
+    exit /b 1
+)
+
+del "%INSTALLER%" >nul 2>nul
+
+goto CHECK_AFTER_INSTALL
+
+
+:CHECK_AFTER_INSTALL
+echo.
+echo [INFO] Checking Python after installation...
+echo.
+
+call :find_python
+
+if defined PYTHON goto RUN_LAUNCHER
+
+if exist "%LocalAppData%\Programs\Python" (
+    for /d %%D in ("%LocalAppData%\Programs\Python\Python*") do (
+        if not defined PYTHON if exist "%%D\python.exe" (
+            "%%D\python.exe" -c "import sys" >nul 2>nul
+
+            if not errorlevel 1 (
+                set "PYTHON=%%D\python.exe"
+                set "PYTHON_ARGS="
+            )
+        )
+    )
+)
+
+if defined PYTHON goto RUN_LAUNCHER
+
+if exist "%ProgramFiles%\Python*" (
+    for /d %%D in ("%ProgramFiles%\Python*") do (
+        if not defined PYTHON if exist "%%D\python.exe" (
+            "%%D\python.exe" -c "import sys" >nul 2>nul
+
+            if not errorlevel 1 (
+                set "PYTHON=%%D\python.exe"
+                set "PYTHON_ARGS="
+            )
+        )
+    )
+)
+
+if defined PYTHON goto RUN_LAUNCHER
 
 echo.
-echo [ОШИБКА] Python не удалось найти даже после установки.
-echo          Без Python работать не могу. Закройте окно, установите
-echo          Python вручную и запустите bootstrap.bat снова:
-echo          https://www.python.org/downloads/
+echo [ERROR] Python could not be found after installation.
+echo.
+echo Install Python manually from:
+echo https://www.python.org/downloads/
+echo.
 pause
 exit /b 1
 
-:have_python
+
+:RUN_LAUNCHER
 echo.
-echo [OK] Python найден
-echo [i] Запускаю лаунчер...
-echo.
-%PY% "%SCRIPT_DIR%launcher.py"
-set "RC=%ERRORLEVEL%"
-if not "%RC%"=="0" (
-    echo.
-    echo [ОШИБКА] Лаунчер завершился с кодом %RC%.
-    echo          Подробности смотрите выше и в файле:
-    echo          %SCRIPT_DIR%reports.txt
-    pause
+echo [OK] Python found:
+echo "%PYTHON%"
+
+if defined PYTHON_ARGS (
+    echo [INFO] Python arguments: %PYTHON_ARGS%
 )
+
+echo.
+echo [INFO] Starting launcher...
+echo.
+
+set "PYTHONUNBUFFERED=1"
+
+"%PYTHON%" %PYTHON_ARGS% "%LAUNCHER%" %LAUNCHER_ARGS%
+
+set "RETURN_CODE=%ERRORLEVEL%"
+
+if not "%RETURN_CODE%"=="0" (
+    echo.
+    echo [ERROR] Launcher exited with code %RETURN_CODE%.
+    echo.
+
+    if exist "%SCRIPT_DIR%\reports.txt" (
+        echo Report file:
+        echo "%SCRIPT_DIR%\reports.txt"
+    )
+
+    pause
+    endlocal
+    exit /b %RETURN_CODE%
+)
+
+echo.
+echo [OK] Launcher finished successfully.
+
 endlocal
+exit /b 0
+
+
+:find_python
+set "PYTHON="
+set "PYTHON_ARGS="
+
+for /f "delims=" %%P in ('where python 2^>nul') do (
+    if not defined PYTHON (
+        echo %%P | findstr /i /c:"WindowsApps" >nul
+
+        if errorlevel 1 (
+            "%%P" -c "import sys" >nul 2>nul
+
+            if not errorlevel 1 (
+                set "PYTHON=%%P"
+                set "PYTHON_ARGS="
+            )
+        )
+    )
+)
+
+if defined PYTHON goto :eof
+
+for /f "delims=" %%P in ('where py 2^>nul') do (
+    if not defined PYTHON (
+        echo %%P | findstr /i /c:"WindowsApps" >nul
+
+        if errorlevel 1 (
+            "%%P" -3 -c "import sys" >nul 2>nul
+
+            if not errorlevel 1 (
+                set "PYTHON=%%P"
+                set "PYTHON_ARGS=-3"
+            )
+        )
+    )
+)
+
+goto :eof

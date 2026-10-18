@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GGUF Launcher: HTTP-сервер, API и точка входа.
-
-Запуск:  python launcher.py [--help|--version|--no-browser]
-"""
+"""HTTP server, API and entry point for GGUF Launcher."""
 
 import json
 import os
@@ -16,146 +13,173 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import gguf_core as core
 import gguf_ui
 
-VERSION = core.VERSION
 
-# ============================================================ HTTP handler
+VERSION = core.VERSION
+MAX_REQUEST_BYTES = 256 * 1024
+ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *a):
+    def log_message(self, *_args):
         pass
 
-    # ---------- отправка ----------
+    def _send(self, code, body, content_type="application/json; charset=utf-8"):
+        data = (
+            body
+            if isinstance(body, bytes)
+            else json.dumps(body, ensure_ascii=False).encode("utf-8")
+        )
 
-    def _send(self, code, body, ctype="application/json; charset=utf-8"):
-        data = body if isinstance(body, bytes) else \
-            json.dumps(body, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
-        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
+
         try:
             self.wfile.write(data)
-        except Exception:
+        except OSError:
             pass
 
     def _body(self):
-        n = int(self.headers.get("Content-Length") or 0)
         try:
-            return json.loads(self.rfile.read(n) or b"{}")
-        except Exception:
-            return {}
+            length = int(self.headers.get("Content-Length") or 0)
 
-    # ---------- GET ----------
+            if length < 0 or length > MAX_REQUEST_BYTES:
+                return {}
+
+            raw = self.rfile.read(length)
+            value = json.loads(raw or b"{}")
+
+            return value if isinstance(value, dict) else {}
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return {}
 
     def do_GET(self):
         try:
             self._route_get()
-        except Exception as e:
-            core.log_report("Ошибка обработки GET %s" % self.path, e)
-            try:
-                self._send(500, {"error": "internal server error: " + str(e)})
-            except Exception:
-                pass
+        except Exception as exc:
+            core.log_report("GET error: %s" % self.path, exc)
+            self._send(500, {"error": "internal server error"})
 
     def _route_get(self):
         path = urllib.parse.urlparse(self.path).path
 
         if path == "/":
-            self._send(200, gguf_ui.HTML.encode("utf-8"),
-                       "text/html; charset=utf-8")
+            self._send(
+                200,
+                gguf_ui.HTML.encode("utf-8"),
+                "text/html; charset=utf-8",
+            )
             return
 
         if path == "/api/status":
             ram = core.ram_available_gb()
-            self._send(200, {
-                "python_ok": True,
-                "python_short": core.python_short(),
-                "version": VERSION,
-                "gpu": core.gpu_info(),
-                "ram_gb": round(ram, 1) if ram is not None else None,
-                "llama": core.llama_info(),
-                "install": {k: core.INSTALL[k] for k in
-                            ("active", "stage", "pct", "message", "error")},
-                "server": {"running": core.SERVER_MGR.running(),
-                           "url": core.SERVER_MGR.url},
-                "platform": sys.platform,
-                "report_path": core.REPORT_PATH,
-            })
+
+            self._send(
+                200,
+                {
+                    "python_ok": True,
+                    "python_short": core.python_short(),
+                    "version": VERSION,
+                    "gpu": core.gpu_info(),
+                    "ram_gb": round(ram, 1) if ram is not None else None,
+                    "llama": core.llama_info(),
+                    "install": core.install_status(),
+                    "server": {
+                        "running": core.SERVER_MGR.running(),
+                        "url": core.SERVER_MGR.url,
+                    },
+                    "platform": sys.platform,
+                    "report_path": core.REPORT_PATH,
+                },
+            )
             return
 
         if path == "/api/disks":
-            self._send(200, {"disks": core.list_disks(),
-                             "known": core.known_model_dirs()})
+            self._send(
+                200,
+                {
+                    "disks": core.list_disks(),
+                    "known": core.known_model_dirs(),
+                },
+            )
             return
 
         if path == "/api/scan":
-            self._send(200, {"running": core.SCAN["running"],
-                             "done": core.SCAN["done"],
-                             "current": core.SCAN["current"],
-                             "count": len(core.SCAN["found"])})
+            self._send(200, core.scan_status())
             return
 
         if path == "/api/scan_results":
-            self._send(200, {"models": list(core.SCAN["found"])})
+            self._send(200, {"models": core.scan_results()})
             return
 
         if path == "/api/install":
-            self._send(200, {k: core.INSTALL[k] for k in
-                             ("active", "stage", "pct", "message", "error")})
+            self._send(200, core.install_status())
             return
 
         if path == "/api/log":
-            self._send(200, {"running": core.SERVER_MGR.running(),
-                             "lines": list(core.SERVER_MGR.log)[-120:]})
+            self._send(
+                200,
+                {
+                    "running": core.SERVER_MGR.running(),
+                    "lines": list(core.SERVER_MGR.log)[-120:],
+                },
+            )
             return
 
         if path == "/api/help":
-            self._send(200, {"help": core.HELP_TEXT, "version": VERSION})
+            self._send(
+                200,
+                {
+                    "help": core.HELP_TEXT,
+                    "version": VERSION,
+                },
+            )
             return
 
         if path == "/api/reports/tail":
-            self._send(200, {"path": core.REPORT_PATH,
-                             "lines": core.tail_reports(200)})
+            self._send(
+                200,
+                {
+                    "path": core.REPORT_PATH,
+                    "lines": core.tail_reports(200),
+                },
+            )
             return
 
         self._send(404, {"error": "not found"})
 
-    # ---------- POST ----------
-
     def do_POST(self):
         try:
             self._route_post()
-        except Exception as e:
-            core.log_report("Ошибка обработки POST %s" % self.path, e)
-            try:
-                self._send(500, {"error": "internal server error: " + str(e)})
-            except Exception:
-                pass
+        except Exception as exc:
+            core.log_report("POST error: %s" % self.path, exc)
+            self._send(500, {"error": "internal server error"})
 
     def _route_post(self):
         path = urllib.parse.urlparse(self.path).path
-        p = self._body()
+        payload = self._body()
 
         if path == "/api/scan":
-            self._send(200, core.start_scan(p.get("path", "")))
+            self._send(200, core.start_scan(payload.get("path", "")))
             return
 
         if path == "/api/scan/stop":
-            core.SCAN["stop"] = True
-            self._send(200, {"ok": True})
+            self._send(200, core.stop_scan())
             return
 
         if path == "/api/analyze":
-            mp = p.get("path", "")
-            if not os.path.isfile(mp):
-                self._send(200, {"error": "файл не найден: " + mp})
+            model_path = str(payload.get("path", ""))
+
+            if not os.path.isfile(model_path):
+                self._send(200, {"error": "file not found: " + model_path})
             else:
-                self._send(200, core.analyze_model(mp))
+                self._send(200, core.analyze_model(model_path))
             return
 
         if path == "/api/run":
-            self._send(200, self._api_run(p))
+            self._send(200, self._api_run(payload))
             return
 
         if path == "/api/stop":
@@ -164,98 +188,170 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/config":
-            cfg = core.load_config()
-            if p.get("llama_dir"):
-                cfg["llama_dir"] = p["llama_dir"]
-                core.save_config(cfg)
-            self._send(200, {"ok": True, "llama": core.llama_info()})
+            llama_dir = payload.get("llama_dir")
+
+            if not isinstance(llama_dir, str) or not llama_dir.strip():
+                self._send(400, {"error": "llama_dir is required"})
+                return
+
+            config = core.load_config()
+            config["llama_dir"] = os.path.abspath(
+                os.path.expanduser(llama_dir.strip())
+            )
+            core.save_config(config)
+
+            self._send(
+                200,
+                {
+                    "ok": True,
+                    "llama": core.llama_info(),
+                },
+            )
             return
 
         if path == "/api/install":
-            if core.INSTALL["active"]:
-                self._send(200, {"error": "установка уже идёт"})
+            if core.install_status()["active"]:
+                self._send(200, {"error": "installation is already running"})
             else:
-                threading.Thread(target=core.install_llama, daemon=True).start()
+                threading.Thread(
+                    target=core.install_llama,
+                    name="llama-install",
+                    daemon=True,
+                ).start()
                 self._send(200, {"started": True})
             return
 
         self._send(404, {"error": "not found"})
 
-    # ---------- бизнес-логика запуска ----------
+    def _api_run(self, payload):
+        model_path = str(payload.get("path", ""))
 
-    def _api_run(self, p):
-        mp = p.get("path", "")
-        if not mp or not os.path.isfile(mp):
-            return {"error": "выберите модель"}
-        info = core.llama_info()
-        if not info["found"]:
-            return {"error": "llama.cpp не найден — установите его на шаге 1"}
+        if not model_path or not os.path.isfile(model_path):
+            return {"error": "select a model"}
+
+        llama = core.llama_info()
+
+        if not llama["found"]:
+            return {"error": "llama.cpp was not found"}
+
         try:
-            ctx = int(p.get("ctx") or 8192)
-            ngl = int(p.get("ngl") or 0)
+            context = int(payload.get("ctx") or 8192)
+            gpu_layers = int(payload.get("ngl") or 0)
         except (ValueError, TypeError):
-            return {"error": "некорректные числа в параметрах"}
-        host = p.get("host") or "127.0.0.1"
+            return {"error": "invalid numeric parameters"}
+
+        if context < 512 or context > 1_000_000:
+            return {"error": "context must be between 512 and 1000000"}
+
+        if gpu_layers < 0 or gpu_layers > 999:
+            return {"error": "GPU layers must be between 0 and 999"}
+
+        host = str(payload.get("host") or "127.0.0.1").strip()
+
+        if host not in ALLOWED_HOSTS:
+            return {
+                "error": "host must be 127.0.0.1, localhost or ::1"
+            }
+
         port = core.free_port(8080)
-        args = ["-m", mp, "-c", str(ctx), "-ngl", str(ngl),
-                "--host", host, "--port", str(port)]
-        result = core.SERVER_MGR.start(info["exe"], args)
+
+        args = [
+            "-m",
+            os.path.abspath(model_path),
+            "-c",
+            str(context),
+            "-ngl",
+            str(gpu_layers),
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ]
+
+        result = core.SERVER_MGR.start(llama["exe"], args)
+
         if result.get("error"):
-            core.log_report("Не удалось запустить сервер: " + result["error"],
-                            extra="model=" + mp)
+            core.log_report(
+                "Could not start server: " + result["error"],
+                extra="model=%s" % model_path,
+            )
+
         return result
 
-# ============================================================ точка входа
 
 def main():
     args = sys.argv[1:]
+
     if "--help" in args or "-h" in args:
         core.print_help()
         return 0
+
     if "--version" in args:
         print("GGUF Launcher " + VERSION)
         return 0
 
     no_browser = "--no-browser" in args
+
     core.install_exception_hooks()
-    core.log_report("Запуск лаунчера",
-                    extra="version=%s python=%s platform=%s cwd=%s report=%s"
-                          % (VERSION, core.python_short(), sys.platform,
-                             os.getcwd(), core.REPORT_PATH))
+    core.log_report(
+        "Launcher started",
+        extra=(
+            "version=%s python=%s platform=%s cwd=%s report=%s"
+            % (
+                VERSION,
+                core.python_short(),
+                sys.platform,
+                os.getcwd(),
+                core.REPORT_PATH,
+            )
+        ),
+    )
 
     port = core.free_port(8765)
+
     try:
-        httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    except OSError as e:
-        core.log_report("Не удалось открыть HTTP-порт %s" % port, e)
-        print("Не удалось запустить HTTP-сервер на порту %d: %s" % (port, e))
-        print("Подробности в reports.txt")
+        http_server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    except OSError as exc:
+        core.log_report("Could not open HTTP port %s" % port, exc)
+        print("Could not start HTTP server on port %d: %s" % (port, exc))
+        print("See reports.txt for details.")
         return 1
 
     url = "http://127.0.0.1:%d" % port
+
     print("=" * 52)
-    print("  GGUF Launcher v%s запущен: %s" % (VERSION, url))
-    print("  Справка:          python launcher.py --help")
-    print("  Журнал ошибок:    reports.txt")
-    print("  Не закрывайте это окно.")
+    print("  GGUF Launcher v%s started: %s" % (VERSION, url))
+    print("  Help:             python launcher.py --help")
+    print("  Error log:        reports.txt")
+    print("  Do not close this window.")
     print("=" * 52)
 
     if not no_browser:
-        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+        threading.Timer(
+            0.8,
+            lambda: webbrowser.open(url),
+        ).start()
 
     try:
-        httpd.serve_forever()
+        http_server.serve_forever()
     except KeyboardInterrupt:
         pass
-    except Exception as e:
-        core.log_report("Сбой HTTP-сервера", e)
+    except Exception as exc:
+        core.log_report("HTTP server failure", exc)
         return 1
     finally:
         try:
+            http_server.server_close()
+        except Exception:
+            pass
+
+        try:
             core.SERVER_MGR.stop()
-        except Exception as e:
-            core.log_report("Ошибка при остановке llama-server", e)
-        core.log_report("Остановка лаунчера")
+        except Exception as exc:
+            core.log_report("Error stopping llama-server", exc)
+
+        core.log_report("Launcher stopped")
+
     return 0
 
 
